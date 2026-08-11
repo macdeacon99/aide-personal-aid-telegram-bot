@@ -1,0 +1,30 @@
+services:
+  aide:
+    build: .
+    image: aide:v0
+    container_name: aide
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      # Container-level TZ so log timestamps match CFG.tz. The app reads its
+      # own TZ from .env for scheduling; this keeps the two aligned.
+      TZ: ${TZ:-Europe/London}
+      DB_PATH: /app/data/aide.db
+
+    volumes:
+      # SQLite lives on the host so `docker compose down` never loses tasks.
+      - ./data:/app/data
+
+    ports:
+      # Bound to all interfaces so the phone can reach it over Tailscale.
+      # Change to "127.0.0.1:8787:8787" if you front it with a reverse proxy.
+      - "8787:8787"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

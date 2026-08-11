@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Aide v0 — Telegram gateway + scheduler. Entry point: python -m aide.bot"""
 import asyncio
 import logging

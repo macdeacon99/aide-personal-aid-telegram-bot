@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Aide v0 — Anthropic wrapper with model tiering, a daily token budget circuit
 breaker, and deterministic fallbacks. The bot must keep working if this fails."""
 import json

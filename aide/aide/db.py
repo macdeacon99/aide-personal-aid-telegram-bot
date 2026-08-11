@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Aide v0 — SQLite state store. Single-file, WAL mode, thread-safe via one connection per call."""
 import json
 import sqlite3

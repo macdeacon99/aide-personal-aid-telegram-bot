@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Aide v0 — read-only CalDAV client (iCloud, Fastmail, Nextcloud all speak CalDAV).
 Fails soft: any error returns [] and the brief carries on without the calendar."""
 from dataclasses import dataclass
