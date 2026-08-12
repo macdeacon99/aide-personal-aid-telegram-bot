@@ -1,4 +1,4 @@
-# Aide v0 — Telegram Personal Assistant
+# Aide v1 — Telegram Personal Assistant
 
 Proactive PA over Telegram: morning brief (calendar + carry-over tasks + phone
 telemetry), natural-language task capture, priorities capture, defer autopsy,
@@ -94,3 +94,40 @@ env-file + one process + one SQLite file, so it slots straight into a GitOps flo
 See `pa-spec.md`. v1 adds: intraday check-ins with adaptive silence (needs
 calendar busy-detection), time-block planning, calendar write, evening shutdown
 with the energy check.
+
+---
+
+## v1 — the agent rewrite
+
+v0 had a structural flaw: the chat path and the task system were separate
+programs. The model could talk but not act, so it would say "I don't have
+access to your task system" while reading the same database that had just
+produced the morning brief.
+
+v1 gives the model tools and an execution loop:
+
+| Tool | What it does |
+|---|---|
+| `list_tasks` | Read tasks, filtered by status or due date |
+| `add_task` | Create a task |
+| `complete_tasks` | Close one, several, or all (all needs confirmation) |
+| `update_task` | Retitle, reschedule, reprioritise, defer |
+| `drop_tasks` | Abandon tasks |
+| `get_calendar` | Read today or N days ahead |
+| `create_calendar_event` | **Write** to the calendar |
+| `set_reminder` / `list_reminders` / `cancel_reminder` | One-off timed nudges |
+| `get_telemetry` | Steps, sleep, screen time |
+| `remember` / `recall` | Durable facts that survive the conversation |
+| `search_history` | Find something referenced but not restated |
+
+**Memory** is now lookup rather than recall. The system prompt is rebuilt every
+turn with the current time, open task count, and every stored fact; anything
+older is a `search_history` call away. That's more reliable than a rolling
+message window and doesn't degrade as conversations get long.
+
+**Reminders** fire from a job running every minute, respecting quiet hours.
+
+**Requires `ANTHROPIC_API_KEY`.** Without it the agent can't run at all — the
+bot falls back to bare task capture and tells you plainly rather than
+pretending. Roughly £4 of credit lasts about a year at this volume; the
+`DAILY_TOKEN_BUDGET` circuit breaker caps runaway spend.

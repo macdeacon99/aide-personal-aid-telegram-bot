@@ -157,43 +157,35 @@ async def cmd_dnd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     db.log_msg("in", text)
-    parsed = llm.parse_intent(text)
-    intent = parsed.get("intent", "chat")
 
-    if intent == "add_task":
-        title = parsed.get("title") or text
-        due = parsed.get("due")
-        tid = db.add_task(title, due=due, priority=int(parsed.get("priority") or 3))
-        await send(ctx, f"✅ #{tid} {title}" + (f" [due {due}]" if due else ""), "add_task")
+    await ctx.bot.send_chat_action(chat_id=CFG.owner_id, action="typing")
+    reply = llm.agent_turn(text)
 
-    elif intent == "list_tasks":
-        await cmd_tasks(update, ctx)
-
-    elif intent == "complete_task":
-        q = (parsed.get("query") or "").lower()
-        match = next((t for t in db.open_tasks() if q and q in t["title"].lower()), None)
-        if match:
-            db.complete_task(match["id"])
-            await send(ctx, f"✅ #{match['id']} {match['title']} — done.", "complete_task")
+    if reply is None:
+        # No API key or budget blown — fall back to bare task capture so the
+        # bot still does something useful rather than nothing.
+        low = text.lower().strip()
+        m = re.match(r"^(add|remind me to|remember to|need to)\s+(.+)$", low)
+        if m:
+            title = text[m.start(2):]
+            tid = db.add_task(title)
+            reply = f"Added #{tid}: {title}\n(No API key set — running in basic mode.)"
         else:
-            await send(ctx, "Couldn't match that to an open task — /tasks to see IDs.", "complete_task")
-
-    elif intent == "set_priorities":
-        from datetime import date
-        prios = [str(p) for p in (parsed.get("priorities") or [])][:5]
-        if prios:
-            db.save_priorities(date.today().isoformat(), prios)
-            await send(ctx, "Locked in:\n" + "\n".join(f"{i+1}. {p}" for i, p in enumerate(prios)),
-                       "set_priorities")
-        else:
-            await send(ctx, "Give me them as a list and I'll lock them in.", "set_priorities")
-
-    else:
-        reply = llm.chat(text)
-        await send(ctx, reply or "Noted. (Brain's offline — logged it, will pick up later.)", "chat")
+            reply = ("No API key configured, so I can't hold a conversation right now. "
+                     "Commands still work: /tasks /add /done /brief")
+    await send(ctx, reply, "agent")
 
 
 # ---------- scheduled jobs ----------
+async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
+    """Fire any due reminders. Runs every minute; quiet hours still apply."""
+    if in_quiet_hours():
+        return
+    for r in db.due_reminders():
+        await send(ctx, f"\u23f0 {r['message']}", "reminder")
+        db.mark_reminder_sent(r["id"])
+
+
 async def job_morning_brief(ctx: ContextTypes.DEFAULT_TYPE):
     if in_quiet_hours():
         return
@@ -225,6 +217,9 @@ def main():
     eh, em = CFG.brief_weekend
     app.job_queue.run_daily(job_morning_brief, dtime(eh, em, tzinfo=CFG.tz),
                             days=(0, 6), name="brief_weekend")
+
+    # Reminders — checked every minute
+    app.job_queue.run_repeating(job_reminders, interval=60, first=30, name="reminders")
 
     # Telemetry ingest server alongside the bot
     if CFG.ingest_secret:
