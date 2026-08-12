@@ -26,7 +26,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 
 from .config import CFG
 
-BODY_CHARS = 1500          # per-message cap fed to the model
+BODY_CHARS = 700           # per-message cap fed to the model
 LIST_HEADERS = ("list-unsubscribe", "list-unsubscribe-post")
 
 
@@ -53,6 +53,16 @@ class Mail:
         flag = "•" if self.unread else " "
         tag = " [newsletter]" if self.is_bulk else ""
         return f"{flag} [{self.uid}] {when} — {self.sender_name or self.sender_addr}: {self.subject}{tag}"
+
+    def headers_line(self) -> str:
+        """Compact form — no body. ~20 tokens vs ~400."""
+        when = self.date.strftime("%d/%m %H:%M") if self.date else "?"
+        unsub = ""
+        if self.unsubscribe:
+            unsub = " |UNSUB" + ("-1click" if self.unsubscribe.get("oneclick")
+                                 else "-mailto" if self.unsubscribe.get("mailto")
+                                 else "-link")
+        return f"[{self.uid}] {when} {self.sender_addr} :: {self.subject[:70]}{unsub}"
 
     def for_model(self) -> str:
         """Delimited so the model can't confuse content with instruction."""
@@ -163,7 +173,10 @@ class MailClient:
 
     # ------------------------------------------------------------------
     def fetch(self, unread_only: bool = True, days: int = 2,
-              limit: int = 25, folder: str = "INBOX") -> list[Mail]:
+              limit: int = 25, folder: str = "INBOX",
+              headers_only: bool = False) -> list[Mail]:
+        """headers_only skips body download entirely — far cheaper, and enough
+        for triage counts, sender lists and unsubscribe work."""
         if not self.configured():
             return []
         conn = None
@@ -179,8 +192,11 @@ class MailClient:
                 return []
             uids = data[0].split()[-limit:]
             out: list[Mail] = []
+            fetch_spec = ("(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE "
+                          "LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST)])"
+                          if headers_only else "(BODY.PEEK[])")
             for uid in reversed(uids):
-                typ, msg_data = conn.fetch(uid, "(BODY.PEEK[])")
+                typ, msg_data = conn.fetch(uid, fetch_spec)
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                     continue
                 msg = email.message_from_bytes(msg_data[0][1])
@@ -195,7 +211,7 @@ class MailClient:
                     sender_addr=addr,
                     subject=_decode(msg.get("Subject")) or "(no subject)",
                     date=when,
-                    body=_extract_body(msg),
+                    body=("" if headers_only else _extract_body(msg)),
                     unread=unread_only,
                     unsubscribe=_parse_unsubscribe(msg),
                 ))
@@ -211,11 +227,26 @@ class MailClient:
 
     # ------------------------------------------------------------------
     def counts(self, days: int = 1) -> dict:
-        mails = self.fetch(unread_only=True, days=days, limit=100)
+        mails = self.fetch(unread_only=True, days=days, limit=100, headers_only=True)
         bulk = sum(1 for m in mails if m.is_bulk)
         return {"unread": len(mails), "newsletters": bulk, "personal": len(mails) - bulk}
 
     # ------------------------------------------------------------------
+    def newsletter_senders(self, days: int = 30, limit: int = 200) -> list[dict]:
+        """Aggregate newsletters by sender. Headers only — cheap."""
+        mails = self.fetch(unread_only=False, days=days, limit=limit, headers_only=True)
+        agg: dict = {}
+        for m in mails:
+            if not m.is_bulk:
+                continue
+            k = m.sender_addr.lower()
+            if k not in agg:
+                agg[k] = {"sender": m.sender_name or m.sender_addr,
+                          "addr": m.sender_addr, "count": 0, "uid": m.uid,
+                          "oneclick": bool(m.unsubscribe.get("oneclick"))}
+            agg[k]["count"] += 1
+        return sorted(agg.values(), key=lambda d: -d["count"])
+
     def unsubscribe(self, mail: Mail) -> tuple[bool, str]:
         """Prefer RFC 8058 one-click POST, then mailto. Never scrapes a page."""
         info = mail.unsubscribe

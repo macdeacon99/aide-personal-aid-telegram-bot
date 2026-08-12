@@ -215,3 +215,33 @@ ceiling.
 
 Also set a hard limit at console.anthropic.com → Billing. The app-level budget
 stops runaway usage; the account limit stops it if the app fails.
+
+### Email token discipline
+
+The first email build had a serious cost bug: `check_email` returned every
+message body, and those bodies were then re-sent on every subsequent round of
+the agent loop. A single unsubscribe request could burn 200k tokens.
+
+The fix is separating cheap from expensive:
+
+| Tool | Cost | Use |
+|---|---|---|
+| `list_email` | ~25 tokens/msg | Triage, counts, finding things. **Default.** |
+| `newsletter_senders` | ~15 tokens/sender | Grouped newsletters for cleanup |
+| `email_summary` | ~20 tokens | Counts only |
+| `read_email` | ~230 tokens/msg | Full bodies. Max 3, only when asked |
+
+Headers-only fetch uses IMAP's `BODY.PEEK[HEADER.FIELDS ...]`, so bodies are
+never downloaded at all — an 89% reduction per message. Twenty messages costs
+~500 tokens instead of ~4,700.
+
+**Unsubscribing never needs bodies.** `newsletter_senders` returns senders with
+counts and uids; `unsubscribe_batch` acts on up to 15 at once.
+
+Three further guards:
+- All tool results hard-capped at 6,000 chars — an unbounded result is re-sent
+  every loop round, so one large fetch compounds.
+- Agent loop capped at 4 rounds (was 6).
+- Body cap reduced to 700 chars when bodies genuinely are needed.
+- The system prompt explicitly tells the model which tools are cheap and not to
+  re-fetch mail it already has in context.
