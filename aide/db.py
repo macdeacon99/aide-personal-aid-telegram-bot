@@ -190,12 +190,17 @@ class DB:
     def tokens_today(self) -> int:
         with self._conn() as c:
             row = c.execute("SELECT COALESCE(SUM(tokens_in + tokens_out),0) AS t FROM messages "
-                            "WHERE date(ts)=date('now')").fetchone()
+                            "WHERE intent='llm_call' AND date(ts)=date('now')").fetchone()
             return row["t"]
 
     def recent_dialogue(self, n: int = 12) -> list[dict]:
+        """Real dialogue only. Meta rows (token accounting) are excluded in SQL —
+        otherwise they eat the LIMIT and history silently shrinks as usage grows."""
         with self._conn() as c:
-            rows = c.execute("SELECT direction, text FROM messages ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+            rows = c.execute(
+                "SELECT direction, text FROM messages "
+                "WHERE direction IN ('in','out') ORDER BY id DESC LIMIT ?",
+                (n,)).fetchall()
         return [dict(r) for r in reversed(rows)]
 
     def tasks_by_status(self, status: str = "open") -> list[dict]:
@@ -303,8 +308,16 @@ class DB:
                             "WHERE id=? AND status='pending'", (rid,))
             return cur.rowcount > 0
 
+    def prune_messages(self, keep_days: int = 60):
+        """Keep the table small. Meta rows past today are never read again."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE intent='llm_call' "
+                      "AND date(ts) < date('now','-2 days')")
+            c.execute("DELETE FROM messages WHERE ts < datetime('now', ?)",
+                      (f'-{keep_days} days',))
+
     # ---------- history search ----------
-    def search_messages(self, query: str, limit: int = 12) -> list[dict]:
+    def search_messages(self, query: str, limit: int = 8) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT ts, direction, text FROM messages "

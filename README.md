@@ -245,3 +245,31 @@ Three further guards:
 - Body cap reduced to 700 chars when bodies genuinely are needed.
 - The system prompt explicitly tells the model which tools are cheap and not to
   re-fetch mail it already has in context.
+
+### Further efficiency fixes
+
+**Meta rows were crowding out conversation history.** `recent_dialogue` pulled
+the last N rows regardless of type, but every LLM call also writes a token-
+accounting row. So requesting 12 rows returned roughly 6 real turns — and it
+would have got worse as usage grew. Now filtered in SQL, so `HISTORY_TURNS`
+means what it says.
+
+**Budget query scoped to `llm_call` rows.** It previously summed the whole
+table for today, which is correct only by accident (other rows have zero
+tokens) and scans more than it needs.
+
+**Nightly pruning** at 04:15 — meta rows older than 2 days are deleted (only
+today's matter for budget arithmetic), and all messages past 60 days go. Keeps
+the table small, which matters for `search_history`'s LIKE scan and for backup
+size.
+
+**Empty-day briefs skip the model entirely.** No events, no tasks, no telemetry
+means there is nothing for the model to shape — return the deterministic draft
+and save the call.
+
+**`search_history` capped** at 8 results × 150 chars, since it feeds straight
+into a tool result that's re-sent each loop round.
+
+**Loop cap restored to 8.** Dropping it to 4 was over-tight — the unsubscribe
+flow alone needs four rounds. The result-size cap is the correct control for
+loop cost, not the round count.

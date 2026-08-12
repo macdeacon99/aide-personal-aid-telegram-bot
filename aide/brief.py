@@ -81,5 +81,9 @@ def build_brief(db: DB, llm: LLM) -> str:
     lines.append("\nWhat are your priorities today? Confirm mine, or tell me yours.")
     raw = "\n".join(lines)
 
+    # Only pay for polish when there is something to shape. An empty day
+    # (no events, no tasks, no telemetry) has nothing for the model to add.
+    if not events and not carry and not tasks:
+        return raw
     polished = llm.polish_brief(raw, context=f"Open task count: {len(tasks)}")
     return polished or raw

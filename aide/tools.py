@@ -556,6 +556,6 @@ def _execute(name: str, args: dict, db: DB) -> str:
         rows = db.search_messages(args["query"])
         if not rows:
             return "Nothing found in past conversation."
-        return "\n".join(f"[{r['ts'][:16]}] {r['direction']}: {r['text'][:200]}" for r in rows)
+        return "\n".join(f"[{r['ts'][:16]}] {r['direction']}: {r['text'][:150]}" for r in rows)
 
     return f"Unknown tool: {name}"

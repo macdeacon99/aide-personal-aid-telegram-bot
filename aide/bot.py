@@ -177,6 +177,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- scheduled jobs ----------
+async def job_nightly_prune(ctx: ContextTypes.DEFAULT_TYPE):
+    """Keep the messages table small — meta rows are only needed for today's
+    budget arithmetic, and old dialogue past 60 days is dead weight."""
+    db.prune_messages()
+
+
 async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
     """Fire any due reminders. Runs every minute; quiet hours still apply."""
     if in_quiet_hours():
@@ -217,6 +223,9 @@ def main():
     eh, em = CFG.brief_weekend
     app.job_queue.run_daily(job_morning_brief, dtime(eh, em, tzinfo=CFG.tz),
                             days=(0, 6), name="brief_weekend")
+
+    # Nightly housekeeping
+    app.job_queue.run_daily(job_nightly_prune, dtime(4, 15, tzinfo=CFG.tz), name="prune")
 
     # Reminders — checked every minute
     app.job_queue.run_repeating(job_reminders, interval=60, first=30, name="reminders")

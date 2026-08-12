@@ -19,7 +19,7 @@ from . import tools as tools_mod
 from .config import CFG
 from .db import DB
 
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 8
 
 _TOOLS_CACHED = None
 
