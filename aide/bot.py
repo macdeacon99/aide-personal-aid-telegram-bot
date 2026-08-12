@@ -5,10 +5,13 @@ import logging
 import re
 from datetime import datetime, time as dtime
 
-from telegram import Update
-from telegram.ext import (Application, CommandHandler, ContextTypes,
-                          MessageHandler, filters)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
 
+from . import fmt
 from .brief import build_brief
 from .calendar_client import todays_events
 from .config import CFG
@@ -41,9 +44,75 @@ def in_quiet_hours(now: datetime | None = None) -> bool:
     return CFG.quiet_start <= h < CFG.quiet_end
 
 
-async def send(ctx: ContextTypes.DEFAULT_TYPE, text: str, intent: str = ""):
-    db.log_msg("out", text, intent)
-    await ctx.bot.send_message(chat_id=CFG.owner_id, text=text)
+async def send(ctx: ContextTypes.DEFAULT_TYPE, text: str, intent: str = "",
+               keyboard: InlineKeyboardMarkup | None = None):
+    """Send with HTML formatting, falling back to plain text if Telegram
+    rejects the markup. A single malformed tag rejects the whole message, so
+    the fallback is not optional."""
+    db.log_msg("out", fmt.strip_all(text), intent)
+    clean = fmt.sanitise(text)
+    try:
+        await ctx.bot.send_message(chat_id=CFG.owner_id, text=clean,
+                                   parse_mode=ParseMode.HTML,
+                                   reply_markup=keyboard,
+                                   disable_web_page_preview=True)
+    except BadRequest as e:
+        log.warning("HTML send failed (%s) — falling back to plain", e)
+        await ctx.bot.send_message(chat_id=CFG.owner_id, text=fmt.strip_all(text),
+                                   reply_markup=keyboard,
+                                   disable_web_page_preview=True)
+
+
+def task_keyboard(tasks: list[dict], limit: int = 5) -> InlineKeyboardMarkup | None:
+    """A row per task: done / defer / drop. Beats typing commands on a phone."""
+    if not tasks:
+        return None
+    rows = []
+    for t in tasks[:limit]:
+        label = t["title"][:22] + ("…" if len(t["title"]) > 22 else "")
+        rows.append([
+            InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{t['id']}"),
+            InlineKeyboardButton("⏭", callback_data=f"defer:{t['id']}"),
+            InlineKeyboardButton("❌", callback_data=f"drop:{t['id']}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+@owner_only
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        action, raw_id = q.data.split(":", 1)
+        tid = int(raw_id)
+    except (ValueError, AttributeError):
+        return
+
+    if action == "done":
+        ok = db.complete_task(tid)
+        msg = f"✅ #{tid} done." if ok else f"#{tid} already closed."
+    elif action == "defer":
+        count = db.defer_task(tid)
+        if count is None:
+            msg = f"#{tid} not open."
+        elif count >= 3:
+            msg = (f"⏭ #{tid} deferred — <b>×{count}</b>. "
+                   "Do it, schedule it, delegate it, or drop it.")
+        else:
+            msg = f"⏭ #{tid} deferred (×{count})."
+    elif action == "drop":
+        ok = db.drop_task(tid)
+        msg = f"❌ #{tid} dropped." if ok else f"#{tid} not open."
+    else:
+        return
+
+    db.log_msg("out", fmt.strip_all(msg), "button")
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass
+    await ctx.bot.send_message(chat_id=CFG.owner_id, text=fmt.sanitise(msg),
+                               parse_mode=ParseMode.HTML)
 
 
 # ---------- commands ----------
@@ -56,7 +125,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cmd_brief(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await send(ctx, build_brief(db, llm), "brief")
+    await send(ctx, build_brief(db, llm), "brief",
+               keyboard=task_keyboard(db.open_tasks()))
 
 
 @owner_only
@@ -188,7 +258,7 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
     if in_quiet_hours():
         return
     for r in db.due_reminders():
-        await send(ctx, f"\u23f0 {r['message']}", "reminder")
+        await send(ctx, f"⏰ <b>{fmt.esc(r['message'])}</b>", "reminder")
         db.mark_reminder_sent(r["id"])
 
 
@@ -198,7 +268,8 @@ async def job_morning_brief(ctx: ContextTypes.DEFAULT_TYPE):
     dnd = db.dnd_until()
     if dnd and dnd > datetime.now():
         return
-    await send(ctx, build_brief(db, llm), "brief")
+    await send(ctx, build_brief(db, llm), "brief",
+               keyboard=task_keyboard(db.open_tasks()))
 
 
 def main():
@@ -214,6 +285,7 @@ def main():
                      ("tasks", cmd_tasks), ("done", cmd_done), ("defer", cmd_defer),
                      ("drop", cmd_drop), ("plan", cmd_plan), ("dnd", cmd_dnd)]:
         app.add_handler(CommandHandler(name, fn))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
     # Weekday + weekend briefs

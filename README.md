@@ -273,3 +273,27 @@ into a tool result that's re-sent each loop round.
 **Loop cap restored to 8.** Dropping it to 4 was over-tight — the unsubscribe
 flow alone needs four rounds. The result-size cap is the correct control for
 loop cost, not the round count.
+
+## Message formatting
+
+Telegram renders a small HTML subset — `b i u s code pre a tg-spoiler
+blockquote`. No tables, headings, lists, or colours.
+
+**A single malformed tag makes Telegram reject the entire message** with a 400.
+Since the LLM writes most of Aide's output, that's a real failure mode, so:
+
+- `fmt.sanitise()` strips unsupported tags (keeping inner text), removes
+  `script`/`style` including contents, drops stray closing tags, and closes
+  anything left open.
+- `send()` tries HTML first and falls back to plain text on `BadRequest`, so a
+  formatting bug degrades the look rather than losing the message.
+- All dynamic content goes through `fmt.esc()` — a task titled
+  `Fix <the> thing & stuff` would otherwise break the markup.
+- The system prompt tells the model exactly which tags exist and to close them.
+
+### Inline keyboards
+
+The brief carries a row of buttons per task — ✅ done / ⏭ defer / ❌ drop — for
+the top five. One tap instead of typing `/done 3`, which matters on a phone.
+Deferring past 3 still triggers the autopsy prompt. Buttons are removed from the
+message once used so stale ones can't be tapped twice.

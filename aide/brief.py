@@ -3,6 +3,7 @@ If every external dependency is down, the user still gets calendar-less, stat-le
 correctly-formatted brief with their tasks."""
 from datetime import date, timedelta
 
+from . import fmt
 from .calendar_client import todays_events
 from .mail import MailClient
 from .db import DB
@@ -35,32 +36,33 @@ def telemetry_line(db: DB) -> str:
 
 def build_brief(db: DB, llm: LLM) -> str:
     today = date.today()
-    lines = [f"Morning. {today.strftime('%A %d %b')}."]
+    tasks_all = db.open_tasks()
+    lines = [fmt.header(today, len(tasks_all))]
 
     # Calendar
     events = todays_events()
     if events:
-        lines.append("\nCalendar:")
-        lines += [e.line() for e in events[:8]]
+        lines.append(f"\n{fmt.SECTION['calendar']} <b>Calendar</b>")
+        lines += [fmt.esc(e.line()) for e in events[:8]]
     else:
-        lines.append("\nCalendar: clear (or unreachable).")
+        lines.append(f"\n{fmt.SECTION['calendar']} Calendar clear")
 
-    # Carry-over + open tasks
+    # Carry-over
     carry = db.carry_over()
     if carry:
-        lines.append("\nCarry-over:")
+        lines.append(f"\n{fmt.SECTION['carry']} <b>Carry-over</b>")
         for t in carry[:6]:
-            age = f" — day {t['age_days'] + 1} rolling" if t.get("age_days", 0) >= 2 else ""
-            defer = f" (deferred x{t['defer_count']})" if t["defer_count"] >= 3 else ""
-            due = f" [due {t['due']}]" if t["due"] else ""
-            lines.append(f"• #{t['id']} {t['title']}{due}{age}{defer}")
+            line = fmt.task_line(t)
+            if t.get("age_days", 0) >= 2:
+                line += f" · <i>day {t['age_days'] + 1}</i>"
+            lines.append(line)
 
-    # Suggested top 3 = highest priority, oldest, nearest due
-    tasks = db.open_tasks()
+    # Suggested top 3
+    tasks = tasks_all
     if tasks:
-        lines.append("\nMy suggested top 3:")
-        for t in tasks[:3]:
-            lines.append(f"{tasks.index(t) + 1}. {t['title']}")
+        lines.append(f"\n{fmt.SECTION['top3']} <b>Top 3</b>")
+        for i, t in enumerate(tasks[:3], 1):
+            lines.append(f"{i}. {fmt.esc(t['title'])}")
 
     # Email
     try:
@@ -68,17 +70,17 @@ def build_brief(db: DB, llm: LLM) -> str:
         if mc.configured():
             c = mc.counts(days=1)
             if c["unread"]:
-                lines.append(f"\nInbox: {c['unread']} unread "
-                             f"({c['personal']} personal, {c['newsletters']} newsletters)")
+                lines.append(f"\n{fmt.SECTION['inbox']} <b>{c['unread']}</b> unread "
+                             f"· {c['personal']} personal, {c['newsletters']} newsletters")
     except Exception:
         pass
 
     # Telemetry
     tl = telemetry_line(db)
     if tl:
-        lines.append("\n" + tl)
+        lines.append(f"\n{fmt.SECTION['health']} {fmt.esc(tl)}")
 
-    lines.append("\nWhat are your priorities today? Confirm mine, or tell me yours.")
+    lines.append("\n<i>Priorities today — confirm mine or tell me yours.</i>")
     raw = "\n".join(lines)
 
     # Only pay for polish when there is something to shape. An empty day
