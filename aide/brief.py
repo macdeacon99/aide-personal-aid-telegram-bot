@@ -4,6 +4,7 @@ correctly-formatted brief with their tasks."""
 from datetime import date, timedelta
 
 from .calendar_client import todays_events
+from .mail import MailClient
 from .db import DB
 from .llm import LLM
 
@@ -60,6 +61,17 @@ def build_brief(db: DB, llm: LLM) -> str:
         lines.append("\nMy suggested top 3:")
         for t in tasks[:3]:
             lines.append(f"{tasks.index(t) + 1}. {t['title']}")
+
+    # Email
+    try:
+        mc = MailClient()
+        if mc.configured():
+            c = mc.counts(days=1)
+            if c["unread"]:
+                lines.append(f"\nInbox: {c['unread']} unread "
+                             f"({c['personal']} personal, {c['newsletters']} newsletters)")
+    except Exception:
+        pass
 
     # Telemetry
     tl = telemetry_line(db)

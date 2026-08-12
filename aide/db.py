@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS config_kv (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS mail_cache (
+    uid TEXT PRIMARY KEY,
+    sender_name TEXT, sender_addr TEXT, subject TEXT,
+    date TEXT, body TEXT, unsub_json TEXT,
+    cached_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS facts (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -220,6 +226,35 @@ class DB:
         with self._conn() as c:
             cur = c.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", vals)
             return cur.rowcount > 0
+
+    # ---------- mail cache ----------
+    def cache_mails(self, mails):
+        import json as _json
+        with self._conn() as c:
+            c.execute("DELETE FROM mail_cache WHERE cached_at < datetime('now','-1 day')")
+            for m in mails:
+                c.execute(
+                    "INSERT INTO mail_cache (uid,sender_name,sender_addr,subject,date,body,unsub_json,cached_at) "
+                    "VALUES (?,?,?,?,?,?,?,datetime('now')) "
+                    "ON CONFLICT(uid) DO UPDATE SET cached_at=datetime('now')",
+                    (m.uid, m.sender_name, m.sender_addr, m.subject,
+                     m.date.isoformat() if m.date else None, m.body[:4000],
+                     _json.dumps(m.unsubscribe)))
+
+    def get_cached_mail(self, uid: str):
+        import json as _json
+        from datetime import datetime as _dt
+        from .mail import Mail
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM mail_cache WHERE uid=?", (uid,)).fetchone()
+        if not r:
+            return None
+        return Mail(
+            uid=r["uid"], sender_name=r["sender_name"], sender_addr=r["sender_addr"],
+            subject=r["subject"],
+            date=_dt.fromisoformat(r["date"]) if r["date"] else None,
+            body=r["body"] or "", unread=False,
+            unsubscribe=_json.loads(r["unsub_json"] or "{}"))
 
     # ---------- facts (durable memory) ----------
     def set_fact(self, key: str, value: str):
