@@ -175,3 +175,43 @@ Use an **app-specific password**, never your account password.
 
 Set `VIP_SENDERS` to a comma-separated list of addresses or domains that should
 be flagged in triage.
+
+## Token efficiency
+
+The agent rewrite made each turn far more expensive than v0 — every call ships
+the system prompt plus 19 tool schemas. Four mitigations, all measured:
+
+**Prompt caching (biggest win).** The system prompt is split into a stable
+block (persona, rules — 2.1k chars) marked `cache_control: ephemeral`, and a
+small volatile block (time, task count, facts — 135 chars) that isn't cached.
+The tool definitions (~1,400 tokens) carry a cache breakpoint on the last
+entry, caching the whole block. Cache reads bill at 0.1x input, so roughly 90%
+of the per-turn input cost falls away after the first call in a 5-minute
+window.
+
+The stable block must be byte-identical between calls or the cache misses —
+there's a test asserting this, because putting the timestamp in the wrong block
+silently costs you the entire saving.
+
+**Model routing.** Simple, unambiguous commands ("add milk", "done #3",
+"list my tasks") go to Haiku at half Sonnet's input rate. Anything
+conversational, reflective, or over 120 characters goes to Sonnet. Currently
+routes ~60% of typical command traffic to the cheap model.
+
+**The brief uses Haiku.** It's formatting a pre-assembled draft, not reasoning.
+
+**History trimming.** 6 turns by default, each capped at 1,200 characters.
+
+### Budget accounting
+
+`DAILY_TOKEN_BUDGET` counts **cache-weighted** tokens — reads at 0.1x, writes
+at 1.25x — so it reflects actual billing rather than raw volume. Without this
+the circuit breaker would trip about 5x too early once caching is working.
+
+At Sonnet 5's introductory $2/$10 rates, 200,000 weighted tokens/day is roughly
+$20/month. From 1 September 2026 the rate goes to $3/$15, so the same spend
+buys about 160,000/day — lower `DAILY_TOKEN_BUDGET` then if $20 is a hard
+ceiling.
+
+Also set a hard limit at console.anthropic.com → Billing. The app-level budget
+stops runaway usage; the account limit stops it if the app fails.

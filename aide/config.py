@@ -25,8 +25,15 @@ class Config:
     # Anthropic
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
     model_fast: str = os.environ.get("MODEL_FAST", "claude-haiku-4-5-20251001")
-    model_smart: str = os.environ.get("MODEL_SMART", "claude-sonnet-4-6")
-    daily_token_budget: int = int(os.environ.get("DAILY_TOKEN_BUDGET", "300000"))
+    model_smart: str = os.environ.get("MODEL_SMART", "claude-sonnet-5")
+    # The brief is formatting, not reasoning — Haiku does it fine for 1/2 the cost.
+    model_brief: str = os.environ.get("MODEL_BRIEF", "claude-haiku-4-5-20251001")
+    # Budget is measured in CACHE-WEIGHTED tokens, so it tracks real spend.
+    daily_token_budget: int = int(os.environ.get("DAILY_TOKEN_BUDGET", "200000"))
+    # Route simple commands to the cheap model
+    enable_routing: bool = os.environ.get("ENABLE_ROUTING", "true").lower() == "true"
+    # Conversation turns kept in context. Lower = cheaper.
+    history_turns: int = int(os.environ.get("HISTORY_TURNS", "6"))
 
     # Calendar (CalDAV — iCloud, Fastmail, Nextcloud, Google via bridge)
     caldav_url: str = os.environ.get("CALDAV_URL", "")

@@ -10,6 +10,7 @@ things up rather than remembering them.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import anthropic
@@ -20,22 +21,28 @@ from .db import DB
 
 MAX_TOOL_ROUNDS = 6
 
+_TOOLS_CACHED = None
 
-def build_system(db: DB) -> str:
-    """Assembled fresh each turn so the model always sees current state."""
-    now = datetime.now(CFG.tz)
-    facts = db.all_facts()
-    open_count = len(db.open_tasks())
 
-    fact_block = ""
-    if facts:
-        fact_block = "\n\nWhat you know about him:\n" + "\n".join(
-            f"- {k}: {v}" for k, v in facts.items())
+def cached_tools():
+    """Tool definitions with a cache breakpoint on the final entry.
 
-    return f"""You are Aide, Gordon's personal assistant and mentor.
+    Marking the last tool caches the entire preceding tool block. These
+    schemas are ~2.5k tokens and identical on every call, so this is the
+    single biggest saving available.
+    """
+    global _TOOLS_CACHED
+    if _TOOLS_CACHED is None:
+        tools = [dict(t) for t in tools_mod.TOOLS]
+        tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+        _TOOLS_CACHED = tools
+    return _TOOLS_CACHED
 
-Right now it is {now.strftime('%A %d %B %Y, %H:%M')} ({CFG.tz}).
-He has {open_count} open tasks.{fact_block}
+
+# The stable half of the system prompt. Identical on every call, so it is
+# marked for caching — cache reads bill at 0.1x input, and this plus the tool
+# definitions are the bulk of what we send each turn.
+STABLE_SYSTEM = """You are Aide, Gordon's personal assistant and mentor.
 
 CHARACTER
 Organised, direct, dry. No flattery, no filler, no corporate warmth. This is
@@ -80,6 +87,38 @@ You are not a therapist. If something is beyond accountability coaching, say so
 plainly and point him at real support."""
 
 
+def volatile_context(db: DB) -> str:
+    """The small changing part — kept separate so the cached block stays stable."""
+    now = datetime.now(CFG.tz)
+    facts = db.all_facts()
+    open_count = len(db.open_tasks())
+    block = (f"Right now it is {now.strftime('%A %d %B %Y, %H:%M')} ({CFG.tz}). "
+             f"He has {open_count} open tasks.")
+    if facts:
+        block += "\n\nWhat you know about him:\n" + "\n".join(
+            f"- {k}: {v}" for k, v in facts.items())
+    return block
+
+
+def build_system(db: DB) -> str:
+    """Full prompt as a plain string (used by tests and the brief)."""
+    return STABLE_SYSTEM + "\n\n" + volatile_context(db)
+
+
+def system_blocks(db: DB) -> list[dict]:
+    """System prompt as cacheable blocks.
+
+    Block 1 is the stable persona and rules, marked with cache_control so it
+    is written once and read at 0.1x thereafter. Block 2 is the small volatile
+    context, uncached because it changes every turn.
+    """
+    return [
+        {"type": "text", "text": STABLE_SYSTEM,
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": volatile_context(db)},
+    ]
+
+
 class LLM:
     def __init__(self, db: DB):
         self.db = db
@@ -90,8 +129,15 @@ class LLM:
         return self.client is not None and self.db.tokens_today() < CFG.daily_token_budget
 
     def _log_usage(self, resp):
-        self.db.log_msg("meta", "[llm]", "llm_call",
-                        resp.usage.input_tokens, resp.usage.output_tokens)
+        u = resp.usage
+        # Cache reads bill at 0.1x, cache writes at 1.25x. Record the real
+        # billable-equivalent so DAILY_TOKEN_BUDGET tracks actual spend
+        # rather than raw volume.
+        read = getattr(u, "cache_read_input_tokens", 0) or 0
+        write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        billable_in = int(u.input_tokens + write * 1.25 + read * 0.1)
+        self.db.log_msg("meta", f"[llm in={u.input_tokens} cw={write} cr={read}]",
+                        "llm_call", billable_in, u.output_tokens)
 
     def agent_turn(self, user_text: str) -> str | None:
         """Run a full tool-use loop and return the final text for the user."""
@@ -100,15 +146,16 @@ class LLM:
 
         messages = self._history()
         messages.append({"role": "user", "content": user_text})
-        system = build_system(self.db)
+        system = system_blocks(self.db)
+        model = self._route_model(user_text)
 
         for _ in range(MAX_TOOL_ROUNDS):
             try:
                 resp = self.client.messages.create(
-                    model=CFG.model_smart,
+                    model=model,
                     max_tokens=1200,
                     system=system,
-                    tools=tools_mod.TOOLS,
+                    tools=cached_tools(),
                     messages=messages,
                 )
             except Exception as e:                            # noqa: BLE001
@@ -135,18 +182,42 @@ class LLM:
 
         return "I got stuck working that out — try asking a different way."
 
-    def _history(self, n: int = 10) -> list[dict]:
+    # ------------------------------------------------------------------
+    def _route_model(self, text: str) -> str:
+        """Cheap turns go to Haiku, which is 1/2 the input cost of Sonnet.
+
+        Only route simple, unambiguous phrasings — anything conversational,
+        reflective, or multi-step needs the better model.
+        """
+        if not CFG.enable_routing:
+            return CFG.model_smart
+        t = text.lower().strip()
+        if len(t) > 120:
+            return CFG.model_smart
+        simple = (
+            r"^(add|remind me to|remember to|need to)\s+\S+",
+            r"^(what|whats|what's)\s+(on|due|left|outstanding)",
+            r"^(list|show)\s+(my\s+)?(tasks|reminders|calendar)",
+            r"^(done|complete|completed|finished)\s+#?\d+",
+            r"^(defer|drop|delete)\s+#?\d+",
+        )
+        return CFG.model_fast if any(re.match(p, t) for p in simple) else CFG.model_smart
+
+    def _history(self, n: int | None = None) -> list[dict]:
+        n = n or CFG.history_turns
         rows = self.db.recent_dialogue(n * 2)
+        MAXLEN = 1200
         msgs: list[dict] = []
         for r in rows:
             role = ("user" if r["direction"] == "in"
                     else "assistant" if r["direction"] == "out" else None)
             if role is None or not r["text"].strip():
                 continue
+            text = r["text"][:MAXLEN]
             if msgs and msgs[-1]["role"] == role:
-                msgs[-1]["content"] += "\n" + r["text"]
+                msgs[-1]["content"] = (msgs[-1]["content"] + "\n" + text)[:MAXLEN * 2]
             else:
-                msgs.append({"role": role, "content": r["text"]})
+                msgs.append({"role": role, "content": text})
         while msgs and msgs[0]["role"] == "assistant":
             msgs.pop(0)
         while msgs and msgs[-1]["role"] == "user":
@@ -156,13 +227,17 @@ class LLM:
     def polish_brief(self, raw_brief: str, context: str = "") -> str | None:
         if not self.available():
             return None
-        system = build_system(self.db) + (
-            "\n\nRewrite the draft brief below in your voice. Keep every fact, "
-            "date and number exactly as given — invent nothing. One phone screen. "
-            "End by asking for today's priorities.")
+        system = [
+            {"type": "text", "text": STABLE_SYSTEM,
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": volatile_context(self.db) + (
+                "\n\nRewrite the draft brief below in your voice. Keep every fact, "
+                "date and number exactly as given — invent nothing. One phone screen. "
+                "End by asking for today's priorities.")},
+        ]
         try:
             resp = self.client.messages.create(
-                model=CFG.model_smart, max_tokens=800, system=system,
+                model=CFG.model_brief, max_tokens=700, system=system,
                 messages=[{"role": "user", "content": f"{context}\n\nDRAFT:\n{raw_brief}"}])
             self._log_usage(resp)
             return "".join(b.text for b in resp.content if b.type == "text").strip()
